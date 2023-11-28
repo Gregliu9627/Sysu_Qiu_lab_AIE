@@ -1,1 +1,628 @@
+library(DESeq2)
+library(dplyr)
+library(ggplot2)
+library(EnhancedVolcano)
+library(ggridges)
+library(reshape2)
+library(msigdbr)
+library(fgsea)
+library(egg)
+library(ggsci)
+basedir<-"C:/Users/Desktop/"
+working<-"chenchen/data/"
+results<-"Results/"
+
+########################################################################basic functions
+###function to caluclate DEGs
+DEG<-function(sampleA,sampleB,dds){
+  sampleA=sampleA
+  sampleB=sampleB
+  dds=dds
+  contrastV<-c("Label",sampleB,sampleA)  
+  res<-results(dds,contrast=contrastV)
+  baseA<-counts(dds,normalized=TRUE)[, colData(dds)$Label == sampleA]
+  if (is.vector(baseA)){
+    baseMeanA <-as.data.frame(baseA)
+  } else {
+    baseMeanA <-as.data.frame(rowMeans(baseA))
+  }
+  colnames(baseMeanA) <-sampleA
+  baseB<-counts(dds,normalized=TRUE)[,colData(dds)$Label == sampleB]
+  if(is.vector(baseB)){
+    baseMeanB<-as.data.frame(baseB)
+  } else {
+    baseMeanB <-as.data.frame(rowMeans(baseB))
+  }
+  colnames(baseMeanB) <-sampleB
+  res<-cbind(baseMeanA, baseMeanB, as.data.frame(res))
+  res<-cbind(ID=rownames(res),as.data.frame(res))
+  res$baseMean<-rowMeans(cbind(baseA,baseB))
+  res$padj[is.na(res$padj)] <- 1
+  res<-res[order(res$padj),]
+}
+
+###
+#list for GO enrichment
+GO_gene_sets <- msigdbr::msigdbr(
+  species = "Mus musculus", 
+  category = "C5", # C5 GO gene sets
+  subcategory = "GO:BP"
+)
+
+GO_gene_sets$gs_name<-gsub("GOBP_","",GO_gene_sets$gs_name)
+GO_gene_sets<-subset(GO_gene_sets, gs_subcat=="GO:BP")
+GO_list <- split(
+  GO_gene_sets$gene_symbol,  
+  GO_gene_sets$gs_name  
+)
+
+#list for KEGG enrichment
+KEGG_gene_sets <- msigdbr::msigdbr(
+  species = "Mus musculus", 
+  category = "C2", # C5 GO gene sets
+  subcategory = "CP:KEGG"
+)
+
+KEGG_gene_sets$gs_name<-gsub("KEGG_","",KEGG_gene_sets$gs_name)
+KEGG_gene_sets<-subset(KEGG_gene_sets, gs_subcat=="CP:KEGG")
+KEGG_list <- split(
+  KEGG_gene_sets$gene_symbol,  
+  KEGG_gene_sets$gs_name
+)
+
+#color palette
+mypal <- pal_npg("nrc", alpha = 0.9)(10)
+mypal2 <-pal_tron("legacy", alpha = 0.9)(7)
+mypal3<-pal_lancet("lanonc", alpha = 0.9)(9)
+mypal4<-pal_simpsons(palette = c("springfield"), alpha = 0.9)(16)
+mypal5 <- pal_rickandmorty(palette = c("schwifty"), alpha = 0.9)(6)
+mypal6 <- pal_futurama(palette = c("planetexpress"), alpha = 0.9)(5)
+mypal7 <- pal_startrek(palette = c("uniform"), alpha = 0.9)(5)
+mycoloursP<- c(mypal, mypal2, mypal3, mypal4)
+#########################################################################Figure 2B
+###count data loading
+data<-read.csv(paste0(basedir,working,"ast_24h.csv"),header=T) %>% 
+      group_by(gene_name) %>%
+      summarise_all("mean") %>% 
+      as.data.frame()
+rownames(data)<-data$gene_name
+data<-data[,-1]
+data$sum<-apply(data,1,sum)
+data<-data %>% subset(sum >30) %>% dplyr::select(!sum) %>% as.data.frame()
+
+sample<-data.frame(Samples=colnames(data),
+                   Label=c(rep("Ctr",3),
+                           rep("CLU",3)
+                   ))
+
+###calculate DEGs
+ddsFullCountTable <- DESeqDataSetFromMatrix(countData = round(data), colData = sample, design= ~ Label)
+dds <- DESeq(ddsFullCountTable)
+res<-DEG(sampleA="Ctr",sampleB="CLU",dds=dds)
+openxlsx::write.xlsx(res, file = paste0(basedir,working,results,"All_res_ast24h.xlsx"))
+res_sig<-res %>% subset(padj<0.05 & abs(log2FoldChange)>0.5) %>% as.data.frame()
+openxlsx::write.xlsx(res_sig, file = paste0(basedir,working,results,"Sig_res_ast24h.xlsx"))
+###volcano plot
+up<-res_sig %>% arrange(desc(log2FoldChange)) %>% top_n(6,log2FoldChange) %>% rownames(.)
+up<-up[-3] #remove non-coding gene
+down<-res_sig %>% arrange(log2FoldChange) %>% slice_min(n=7,log2FoldChange) %>% rownames(.)
+down<-down[-2] #remove non-coding gene
+p<-EnhancedVolcano::EnhancedVolcano(res,
+                                    lab = rownames(res),
+                                    x = 'log2FoldChange',
+                                    y = 'padj',
+                                    title= "CLU vs DPBS",
+                                    titleLabSize = 12,
+                                    subtitle = "",
+                                    pCutoff=0.05,
+                                    FCcutoff = 0.5,
+                                    pointSize = 1,
+                                    labSize=4,
+                                    legendLabels=c('NS','Log2FC','padj','padj & Log2FC'),
+                                    selectLab=c(up,down),
+                                    drawConnectors = TRUE,
+                                    widthConnectors = 0.3,
+                                    ylim=c(0,-log10(10e-40)),
+                                    xlim=c(-3,3),
+                                    axisLabSize = 12,
+                                    gridlines.major = FALSE,
+                                    gridlines.minor = FALSE,
+                                    legendPosition = 'right',
+                                    legendLabSize = 10,
+                                    legendIconSize = 2)
+
+p
+egg::set_panel_size(p,file=paste0(basedir,working,results,"Volcano_ast_24h.pdf"),
+                    margin=unit(1,"mm"),width=unit(8,"cm"),height=unit(8,"cm"))
+
+#########################################################################Figure 2C
+pathways<-read.csv(paste0(basedir,working,"ast_24h_metascape.csv"),header=T) 
+
+to_plot<-pathways$Description[grep("Summary",pathways$GroupID)]
+pathways<-pathways[-grep("Summary",pathways$GroupID),]
+
+pathways<-pathways %>%
+          subset(Description %in% to_plot & Logq< log(0.05)) %>%
+          dplyr::select(Description,Logq, InTerm_InList)
+pathways$all<-as.numeric(sub("[0-9]+/", "", pathways$InTerm_InList))  
+pathways$hit<-as.numeric(sub("/[0-9]+", "", pathways$InTerm_InList))
+pathways$ratio<-pathways$hit/pathways$all
+pathways$Description<-toupper(pathways$Description)
+
+p<-ggplot(pathways, aes(-Logq,Description)) +
+  geom_point(aes(size=all,color=ratio,alpha=0.8))+
+  scale_size(range = c(2,7))+
+  viridis::scale_color_viridis(option="C")+
+  xlab(label="-Log(q-value)")+
+  ylab(label="Pathways")+
+  theme_minimal()+
+  theme(panel.border = element_rect(colour = "black", linewidth = 0.5,fill=NA),
+        axis.line = element_line(colour="black",linewidth = 0.5),
+        axis.text = element_text(face="bold",size=6)) #+
+#xlim(2,2.6)
+p
+egg::set_panel_size(p,file=paste0(basedir,working,results,"AST_24h_GOBP_topNES.pdf"),
+                    margin=unit(1,"mm"),width=unit(6,"cm"),height=unit(8,"cm"))
+
+##############################################################################Figure 2D
+#GSEA
+normalized_counts<-counts(dds,normalized=TRUE)
+
+
+#weighted gene list
+weights<-as.data.frame(normalized_counts) %>% mutate(Ctrl_mean=rowMeans(.[,1:3]),CLU_mean=rowMeans(.[,4:6]),
+                                                     sdCtrl=matrixStats::rowSds(as.matrix(.[,1:3])),
+                                                     sdCLU=matrixStats::rowSds(as.matrix(.[,4:6])))%>%
+                                              mutate(s2n=(CLU_mean-Ctrl_mean)/(sdCtrl+sdCLU)) %>%
+                                              dplyr::select(s2n) %>%
+                                              arrange(desc(s2n))
+
+weights_to_gsea<-weights$s2n
+names(weights_to_gsea)<-rownames(weights)
+
+#GSEA using fgsea
+set.seed(123)
+gene_sets<-KEGG_list
+fgseaRes<-fgsea::fgsea(pathways=gene_sets,
+                       stats=weights_to_gsea,
+                       eps=0.0,
+                       minSize=5,
+                       maxSize=800)
+
+sig_fgseaRes<-fgseaRes %>% subset(padj < 0.05) %>% as.data.frame()
+sig_fgseaRes2<-sig_fgseaRes
+sig_fgseaRes2$leadingEdge <- vapply(sig_fgseaRes2$leadingEdge, paste, collapse = ", ", character(1L))
+openxlsx::write.xlsx(sig_fgseaRes2,paste0(basedir,working,results,"sig_KEGG_GSEA_preranked_ast24.xlsx"))
+
+#"bubble plot" to visulize top pathways
+to_plot<-sig_fgseaRes %>% 
+         arrange(padj) %>% 
+         slice_min(n=30,padj) %>% 
+         subset(NES >0) %>%
+         dplyr::select(c(pathway,padj,NES,size)) %>% 
+         as.data.frame()
+to_plot$pathway<-gsub("_"," ",to_plot$pathway)
+
+p<-ggplot(to_plot, aes(NES,pathway)) +
+  geom_point(aes(size=size,color=-1*log10(padj),alpha=0.8))+
+  scale_size(range = c(2,7))+
+  viridis::scale_color_viridis(option="C")+
+  xlab(label="Normalized enrichment scores")+
+  ylab(label="Pathways")+
+  theme_minimal()+
+  theme(panel.border = element_rect(colour = "black", linewidth = 0.5,fill=NA),
+        axis.line = element_line(colour="black",linewidth = 0.5),
+        axis.text = element_text(face="bold",size=6)) #+
+#xlim(2,2.6)
+p
+egg::set_panel_size(p,file=paste0(basedir,working,results,"AST_24h_KEGG_topNES.pdf"),
+                    margin=unit(1,"mm"),width=unit(6,"cm"),height=unit(8,"cm"))
+
+#############################################################################Figure 3B
+###count data loading
+data<-read.csv(paste0(basedir,working,"opc_3h.csv"),header=T) %>% 
+  group_by(gene_name) %>%
+  summarise_all("mean") %>% 
+  as.data.frame()
+rownames(data)<-data$gene_name
+data<-data[,-1]
+data$sum<-apply(data,1,sum)
+data<-data %>% subset(sum >30) %>% dplyr::select(!sum) %>% as.data.frame()
+
+sample<-data.frame(Samples=colnames(data),
+                   Label=c(rep("Ctr",3),
+                           rep("CLU",3)))
+                   
+###calculate DEGs
+ddsFullCountTable <- DESeqDataSetFromMatrix(countData = round(data), colData = sample, design= ~ Label)
+dds <- DESeq(ddsFullCountTable)
+res<-DEG(sampleA="Ctr",sampleB="CLU",dds=dds)
+openxlsx::write.xlsx(res, file = paste0(basedir,working,results,"All_res_opc3h.xlsx"))
+res_sig<-res %>% subset(padj<0.05 & abs(log2FoldChange)>0.5) %>% as.data.frame()
+openxlsx::write.xlsx(res_sig, file = paste0(basedir,working,results,"Sig_res_opc3h.xlsx"))
+
+
+#GSEA
+normalized_counts<-counts(dds,normalized=TRUE)
+
+
+#weighted gene list
+weights<-as.data.frame(normalized_counts) %>% mutate(Ctrl_mean=rowMeans(.[,1:3]),CLU_mean=rowMeans(.[,4:6]),
+                                                     sdCtrl=matrixStats::rowSds(as.matrix(.[,1:3])),
+                                                     sdCLU=matrixStats::rowSds(as.matrix(.[,4:6])),
+                                                     s2n=(CLU_mean-Ctrl_mean)/(sdCtrl+sdCLU))   %>%
+                                                     dplyr::select(s2n) %>%
+                                                     arrange(desc(s2n))
+
+
+weights_to_gsea<-weights$s2n
+names(weights_to_gsea)<-rownames(weights)
+
+
+#GSEA using fgsea
+set.seed(123)
+gene_sets<-GO_list
+fgseaRes<-fgsea::fgsea(pathways=gene_sets,
+                       stats=weights_to_gsea,
+                       eps=0.0,
+                       minSize=5,
+                       maxSize=800)
+
+sig_fgseaRes<-fgseaRes %>% subset(padj < 0.05) %>% as.data.frame()
+sig_fgseaRes2<-sig_fgseaRes
+sig_fgseaRes2$leadingEdge <- vapply(sig_fgseaRes2$leadingEdge, paste, collapse = ", ", character(1L))
+openxlsx::write.xlsx(sig_fgseaRes2,paste0(basedir,working,results,"sig_KEGG_GSEA_preranked_opc3h.xlsx"))
+
+#"bubble plot" to visulize top pathways
+to_plot<-sig_fgseaRes %>% 
+  arrange(padj) %>% 
+  slice_min(n=20,padj) %>% 
+  subset(NES > 0) %>%
+  dplyr::select(c(pathway,padj,NES,size)) %>% 
+  as.data.frame()
+
+to_plot$pathway<-gsub("_"," ",to_plot$pathway)
+p<-ggplot(to_plot, aes(NES,pathway)) +
+  geom_point(aes(size=size,color=-1*log10(padj),alpha=0.8))+
+  scale_size(range = c(2,7))+
+  viridis::scale_color_viridis(option="C")+
+  xlab(label="Normalized enrichment scores")+
+  ylab(label="Pathways")+
+  theme_minimal()+
+  theme(panel.border = element_rect(colour = "black", linewidth = 0.5,fill=NA),
+        axis.line = element_line(colour="black",linewidth = 0.5),
+        axis.text = element_text(face="bold",size=6)) #+
+#xlim(2,2.6)
+p
+egg::set_panel_size(p,file=paste0(basedir,working,results,"OPC_3h_GOBP_topNES.pdf"),
+                    margin=unit(1,"mm"),width=unit(6,"cm"),height=unit(8,"cm"))
+
+
+#################################################################################Supplementary Table4
+#GSEA using fgsea
+set.seed(123)
+gene_sets<-KEGG_list
+fgseaRes<-fgsea::fgsea(pathways=gene_sets,
+                       stats=weights_to_gsea,
+                       eps=0.0,
+                       minSize=5,
+                       maxSize=800)
+
+sig_fgseaRes<-fgseaRes %>% subset(padj < 0.05) %>% as.data.frame()
+sig_fgseaRes2<-sig_fgseaRes
+sig_fgseaRes2$leadingEdge <- vapply(sig_fgseaRes2$leadingEdge, paste, collapse = ", ", character(1L))
+openxlsx::write.xlsx(sig_fgseaRes2,paste0(basedir,working,results,"sig_KEGG_GSEA_preranked_opc3h.xlsx"))
+
+#################################################################################Figure 3C
+###count data loading
+data<-read.csv(paste0(basedir,working,"opc_24h.csv"),header=T) %>% 
+  group_by(gene_name) %>%
+  summarise_all("mean") %>% 
+  as.data.frame()
+rownames(data)<-data$gene_name
+data<-data[,-1]
+data$sum<-apply(data,1,sum)
+data<-data %>% subset(sum >30) %>% dplyr::select(!sum) %>% as.data.frame()
+
+sample<-data.frame(Samples=colnames(data),
+                   Label=c(rep("Ctr",3),
+                           rep("CLU",3)))
+
+###calculate DEGs
+ddsFullCountTable <- DESeqDataSetFromMatrix(countData = round(data), colData = sample, design= ~ Label)
+dds <- DESeq(ddsFullCountTable)
+res<-DEG(sampleA="Ctr",sampleB="CLU",dds=dds)
+openxlsx::write.xlsx(res, file = paste0(basedir,working,results,"All_res_opc24h.xlsx"))
+res_sig<-res %>% subset(padj<0.05 & abs(log2FoldChange)>0.5) %>% as.data.frame()
+openxlsx::write.xlsx(res_sig, file = paste0(basedir,working,results,"Sig_res_opc24h.xlsx"))
+
+
+###volcano plot
+up<-res_sig %>% arrange(desc(log2FoldChange)) %>% top_n(6,log2FoldChange) %>% rownames(.)
+
+down<-res_sig %>% arrange(log2FoldChange) %>% slice_min(n=7,log2FoldChange) %>% rownames(.)
+down<-down[-c(3,5)] #remove non-coding gene
+p<-EnhancedVolcano::EnhancedVolcano(res,
+                                    lab = rownames(res),
+                                    x = 'log2FoldChange',
+                                    y = 'padj',
+                                    title= "CLU vs DPBS",
+                                    titleLabSize = 12,
+                                    subtitle = "",
+                                    pCutoff=0.05,
+                                    FCcutoff = 0.5,
+                                    pointSize = 1,
+                                    labSize=4,
+                                    legendLabels=c('NS','Log2FC','padj','padj & Log2FC'),
+                                    selectLab=c(up,down),
+                                    drawConnectors = TRUE,
+                                    widthConnectors = 0.3,
+                                    ylim=c(0,-log10(10e-200)),
+                                    xlim=c(-3,3),
+                                    axisLabSize = 12,
+                                    gridlines.major = FALSE,
+                                    gridlines.minor = FALSE,
+                                    legendPosition = 'right',
+                                    legendLabSize = 10,
+                                    legendIconSize = 2)
+
+p
+egg::set_panel_size(p,file=paste0(basedir,working,results,"Volcano_opc_24h.pdf"),
+                    margin=unit(1,"mm"),width=unit(8,"cm"),height=unit(8,"cm"))
+
+
+##############################################################################Figure 3D
+go<-read.csv(paste0(basedir,working,"OPC_24h_down_GO.csv"),header=T)
+p<-ggplot(go, aes(RichFactor,reorder(Description,RichFactor),fill=qvalue)) +
+  geom_bar(stat="identity",width=0.8)+
+  viridis::scale_fill_viridis(option="D",direction = -1)+
+  xlab(label="RichFactor")+
+  ylab(label="Pathways")+
+  theme_minimal()+
+  theme(panel.border = element_rect(colour = "black", linewidth = 0.5,fill=NA),
+        axis.line = element_line(colour="black",linewidth = 0.5),
+        axis.text = element_text(face="bold",size=8)) #+
+
+p
+egg::set_panel_size(p,file=paste0(basedir,working,results,"OPC_24h_down_GO_selected.pdf"),
+                    margin=unit(1,"mm"),width=unit(8,"cm"),height=unit(8,"cm"))
+
+##############################################################################Figure 3E
+gene_to_plot<-c("Dlx1","Bmp4","Dlx2","Plp1","Fa2h","Myrf","Cntnap2","9630013A20Rik","Bcas1","Lgi4","Mbp")
+to_plot<-normalized_counts[gene_to_plot,]
+colnames(to_plot)<-c("Ctrl1","Ctrl2","Ctrl3","Clu1","Clu2","Clu3")
+
+annotation<-data.frame(Group=c(rep("Ctrl",3),rep("Clu",3)))
+rownames(annotation)<-colnames(to_plot)
+
+pdf(paste0(basedir,working,results,"down_go_heatmap.pdf"),6,6)
+pheatmap(to_plot,scale="row",
+         color = colorRampPalette(c("#457b9d", "#f1faee", "#e63946"))(50),
+         cellwidth = 20,
+         cellheight = 20,
+         border_color = NA,
+         annotation = annotation,
+         cluster_cols = F,
+         show_colnames = F,
+         gaps_col=cumsum(3),
+         fontsize_row = 12
+)
+dev.off()
+
+
+##############################################################################Figure 3G
+#GSEA
+normalized_counts<-counts(dds,normalized=TRUE)
+
+
+#weighted gene list
+weights<-as.data.frame(normalized_counts) %>% mutate(Ctrl_mean=rowMeans(.[,1:3]),CLU_mean=rowMeans(.[,4:6]),
+                                                     sdCtrl=matrixStats::rowSds(as.matrix(.[,1:3])),
+                                                     sdCLU=matrixStats::rowSds(as.matrix(.[,4:6])))   %>%
+  mutate(s2n=(CLU_mean-Ctrl_mean)/(sdCtrl+sdCLU)) %>%
+  dplyr::select(s2n) %>%
+  arrange(desc(s2n))
+
+
+weights_to_gsea<-weights$s2n
+names(weights_to_gsea)<-rownames(weights)
+
+#GSEA using fgsea
+set.seed(123)
+gene_sets<-GO_list
+fgseaRes<-fgsea::fgsea(pathways=gene_sets,
+                       stats=weights_to_gsea,
+                       eps=0.0,
+                       minSize=5,
+                       maxSize=800)
+
+sig_fgseaRes<-fgseaRes %>% subset(padj < 0.05) %>% as.data.frame()
+sig_fgseaRes2<-sig_fgseaRes
+sig_fgseaRes2$leadingEdge <- vapply(sig_fgseaRes2$leadingEdge, paste, collapse = ", ", character(1L))
+openxlsx::write.xlsx(sig_fgseaRes2,paste0(basedir,working,results,"sig_GOBP_GSEA_preranked_opc24h.xlsx"))
+
+#"bubble plot" to visulize top pathways
+to_plot<-sig_fgseaRes %>% 
+  arrange(padj) %>% 
+  slice_min(n=20,padj) %>% 
+  subset(NES > 0) %>%
+  dplyr::select(c(pathway,padj,NES,size)) %>% 
+  as.data.frame()
+
+to_plot$pathway<-gsub("_"," ",to_plot$pathway)
+p<-ggplot(to_plot, aes(NES,pathway)) +
+  geom_point(aes(size=size,color=-1*log10(padj),alpha=0.8))+
+  scale_size(range = c(2,7))+
+  viridis::scale_color_viridis(option="C")+
+  xlab(label="Normalized enrichment scores")+
+  ylab(label="Pathways")+
+  theme_minimal()+
+  theme(panel.border = element_rect(colour = "black", linewidth = 0.5,fill=NA),
+        axis.line = element_line(colour="black",linewidth = 0.5),
+        axis.text = element_text(face="bold",size=6)) #+
+#xlim(2,2.6)
+p
+egg::set_panel_size(p,file=paste0(basedir,working,results,"OPC_24h_GOBP_up_topNES.pdf"),
+                    margin=unit(1,"mm"),width=unit(6,"cm"),height=unit(8,"cm"))
+
+
+##################################################################################Supplementary Figure
+data<-as.matrix(data.table::fread(paste0(basedir,working,"GSE180759_expression_matrix.csv")), rownames=1)
+meta<-read.delim(paste0(basedir,working,"GSE180759_annotation.txt"))
+rownames(meta)<-meta$nucleus_barcode
+
+###case1
+case1_meta<-meta[which(meta$NBB_case=="09_034"),]
+case1<-data[,rownames(case1_meta)] %>% CreateSeuratObject(min.cells = 0, min.features = 0, 
+                                                          project = "ms",
+                                                          meta.data=case1_meta)
+case1[["percent.mt"]]<-PercentageFeatureSet(case1, pattern = "^MT.")
+
+case1<-subset(case1,subset=percent.mt<5)
+
+###case2
+case2_meta<-meta[which(meta$NBB_case=="09_067"),]
+case2<-data[,rownames(case2_meta)] %>% CreateSeuratObject(min.cells = 0, min.features = 0, 
+                                                          project = "ms",
+                                                          meta.data=case2_meta)
+case2[["percent.mt"]]<-PercentageFeatureSet(case2, pattern = "^MT.")
+case2<-subset(case2,subset=percent.mt<5.0)
+
+H1_meta<-meta[which(meta$NBB_case=="11_69"),]
+H1<-data[,rownames(H1_meta)] %>% CreateSeuratObject(min.cells = 0, min.features = 0, 
+                                                    project = "ms",
+                                                    meta.data=H1_meta)
+H1[["percent.mt"]]<-PercentageFeatureSet(H1, pattern = "^MT.")
+H1<-subset(H1,subset=percent.mt<5.0)
+
+
+H3_meta<-meta[which(meta$NBB_case=="12_002"),]
+H3<-data[,rownames(H3_meta)] %>% CreateSeuratObject(min.cells = 0, min.features = 0, 
+                                                    project = "ms",
+                                                    meta.data=H3_meta)
+H3[["percent.mt"]]<-PercentageFeatureSet(H3, pattern = "^MT.")
+H3<-subset(H3,subset=percent.mt<5.0)
+
+
+case3_meta<-meta[which(meta$NBB_case=="12_078"),]
+case3<-data[,rownames(case3_meta)] %>% CreateSeuratObject(min.cells = 0, min.features = 0, 
+                                                          project = "ms",
+                                                          meta.data=case3_meta)
+case3[["percent.mt"]]<-PercentageFeatureSet(case3, pattern = "^MT.")
+case3<-subset(case3,subset=percent.mt<5.0)
+
+
+case4_meta<-meta[which(meta$NBB_case=="13_015"),]
+case4<-data[,rownames(case4_meta)] %>% CreateSeuratObject(min.cells = 0, min.features = 0, 
+                                                          project = "ms",
+                                                          meta.data=case4_meta)
+case4[["percent.mt"]]<-PercentageFeatureSet(case4, pattern = "^MT.")
+case4<-subset(case4,subset=percent.mt<5.0)
+
+
+case5_meta<-meta[which(meta$NBB_case=="13_047"),]
+case5<-data[,rownames(case5_meta)] %>% CreateSeuratObject(min.cells = 0, min.features = 0, 
+                                                          project = "ms",
+                                                          meta.data=case5_meta)
+
+case5[["percent.mt"]]<-PercentageFeatureSet(case5, pattern = "^MT.")
+case5<-subset(case5,subset=percent.mt<5.0)
+
+H2_meta<-meta[which(meta$NBB_case=="14_043"),]
+H2<-data[,rownames(H2_meta)] %>% CreateSeuratObject(min.cells = 0, min.features = 0, 
+                                                    project = "ms",
+                                                    meta.data=H2_meta)
+H2[["percent.mt"]]<-PercentageFeatureSet(H2, pattern = "^MT.")
+H2<-subset(H2,subset=percent.mt<5.0)
+
+
+H1<-SCTransform(H1,vst.flavor = "v2", verbose = T) 
+H2<-SCTransform(H2,vst.flavor = "v2", verbose = T) 
+H3<-SCTransform(H3,vst.flavor = "v2", verbose = T) 
+case1<-SCTransform(case1,vst.flavor = "v2", verbose = T) 
+case2<-SCTransform(case2,vst.flavor = "v2", verbose = T) 
+case3<-SCTransform(case3,vst.flavor = "v2", verbose = T) 
+case4<-SCTransform(case4,vst.flavor = "v2", verbose = T) 
+case5<-SCTransform(case5,vst.flavor = "v2", verbose = T) 
+
+
+ms.list <- list(H1=H1,H2=H2,H3=H3,case1=case1,case2=case2,case3=case3,case4=case4,case5=case5)
+features <- SelectIntegrationFeatures(ms.list, nfeatures = 3000)
+ms.list <- PrepSCTIntegration(ms.list, anchor.features = features)
+
+ms.anchors <- FindIntegrationAnchors(object.list = ms.list, normalization.method = "SCT",
+                                     anchor.features = features)
+ms.combined.sct <- IntegrateData(anchorset = ms.anchors, normalization.method = "SCT") %>%
+  RunPCA(verbose=T)  %>%
+  RunUMAP(reduction="pca",dims=1:30,verbose=T) %>%
+  RunTSNE(reduction="pca",dims=1:30,verbose=T) %>%
+  FindNeighbors(reduction="pca",dims=1:30) %>%
+  FindClusters(resolution = 0.5)
+
+###
+DefaultAssay(ms.combined.sct)<-"RNA"
+ms.combined.sct<-NormalizeData(ms.combined.sct)
+saveRDS(ms3,paste0(basedir,working,results,"merge_all_cell.rds"))
+###
+ms3<-readRDS(paste0(basedir,working,results,"merge_all_cell.rds"))
+ms3@meta.data$pathology <- factor(ms3@meta.data$pathology,labels=labels,levels = levels)
+
+newname<-c("Oligo1","Oligo2","Oligo3","Oligo4","Oligo5","Ast1","Mig1","Oligo6","Neuron","OPC","Ast2","Mig2","Endo","Ast3","Fibro","Ast4","LYM")
+names(newname)<-levels(ms3)
+ms3<-RenameIdents(ms3,newname)
+############################################################################Supplementary Figure 1A
+
+p<-DimPlot(ms3,reduction="tsne",#split.by="pathology",
+           repel=TRUE,
+           cols=mycoloursP,ncol=3,   #stepped
+           shuffle=TRUE)
+
+p<-LabelClusters(p, id='ident', box=F, repel=F, position="median",size=3,colour="black")
+egg::set_panel_size(p,file=paste0(basedir,working,results,"Dimplot_all_cell_tsne_withlabel.pdf"),
+                    margin=unit(1,"cm"),width=unit(10,"cm"),height=unit(10,"cm"))
+
+
+#################################################################################Supplementary Figure 1B
+
+p<-VlnPlot(ms3,features=c("CLU","GFAP","AQP4","SOX6","MOG","CSF1R","RUNX1","SYT1","PDGFRA","CLDN5","DCN","CD2"),
+           pt.size=0,stack=TRUE, same.y.lims=FALSE, flip=FALSE) +
+   scale_fill_brewer(palette="Paired")
+egg::set_panel_size(p,file=paste0(basedir,working,results,"VlnPlot_all_cell_markers_noflip.pdf"),
+                    margin=unit(1,"cm"),width=unit(0.8,"cm"),height=unit(10,"cm"))
+
+#################################################################################Supplementary Figure 1C
+ast<-subset(ms3,idents=c("Ast1","Ast2","Ast3","Ast4"))
+levels(ast$pathology)<-c("Control","Periplaque","Inactive","Active","Core")
+DefaultAssay(ast)<-"RNA"
+p<-FeaturePlot(ms3,features="CLU",reduction="tsne",split.by = "pathology",
+               ncol=3,keep.scale = "feature", 
+               label=F, repel=TRUE, pt.size = 0.2,
+               cols = c("lightgrey", "#ffcc66", "red"))
+
+
+pdf(paste0(basedir,working,results,"Featureplot_all_CLU_pathology_withoutlabel.pdf"),18.75,3.75)
+p
+dev.off()
+
+################################################################################Supplementary Figure 2A
+ast_marker<-list("A1"=c("HLA-E","SERPING1","HLA-A","GATA1","GBP2","FBLN5","FKBP5",
+                        "PSMB8","SRGN","AMIGO2"),
+                 "A2"=c("CLCF1","TGM1","PTX3","S100A10","SPHK1","CD109","PTGS2","EMP1",
+                        "SLC10A6","TM4SF1","B3GNT5","CD14"))
+
+p<-SCpubr::do_EnrichmentHeatmap(sample = ast,
+                                input_gene_list = ast_marker,
+                                group.by = "pathology",
+                                flip = F, 
+                                column_names_rot = 90,row_names_rot = 0, 
+                                cell_size = 8       
+)
+
+pdf(file=paste0(basedir,working,results,"ast_marker_score_pathology.pdf"),8,8) 
+p
+dev.off()
+
+
+
+
 
